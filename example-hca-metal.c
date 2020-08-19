@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include <metal/io.h>
-#include <metal/machine/platform.h>
+#include <metal/platform.h>
 #include <metal/cpu.h>
 
 #include <api/scl_api.h>
@@ -320,7 +320,7 @@ int main(int argc, char *argv[]) {
     size_t i;
     size_t len;
 
-	struct metal_cpu *cpu;
+	struct metal_cpu cpu;
 	cpu = metal_cpu_get(metal_cpu_get_current_hartid());
 
 #if __riscv_xlen == 32
