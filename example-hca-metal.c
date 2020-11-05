@@ -9,8 +9,11 @@
 #include <metal/platform.h>
 #include <metal/cpu.h>
 
-#include <api/scl_api.h>
-#include <api/hardware/scl_hca.h>
+#include <metal/crypto.h>
+#include <metal/hca.h>
+#include <metal/hca_aes.h>
+#include <metal/hca_sha.h>
+#include <metal/hca_trng.h>
 
 #define UNIT32_BE(data, k)      ( (*(data + k) << 24) + (*(data + k + 1) << 16) + (*(data + k + 2) << 8) + (*(data + k + 3)) )
 
@@ -222,89 +225,8 @@ uint8_t SHA224_expected[28] __attribute__((aligned(8))) = {
 
 #define CCM_TQ(t, q)     ((uint8_t)((uint8_t)(t & 0xF) + (uint8_t)(q << 4)))
 
-#if METAL_SIFIVE_HCA_VERSION >= HCA_VERSION(0,5,0)
-metal_scl_t metal_sifive_scl = {
-# if defined(HCA_HAS_AES)        
-    .aes_func = {
-        .setkey = hca_aes_setkey,
-        .setiv  = hca_aes_setiv,
-        .cipher = hca_aes_cipher,
-#  if defined(HCA_HAS_AESMAC)
-        .auth_init = hca_aes_auth_init, 
-        .auth_core = hca_aes_auth_core,
-        .auth_finish = hca_aes_auth_finish
-#  else
-        .auth_init = default_aes_auth_init, 
-        .auth_core = default_aes_auth_core,
-        .auth_finish = default_aes_auth_finish
-#  endif
-    },
-# else
-    .aes_func = {
-        .setkey = default_aes_setkey,
-        .setiv  = default_aes_setiv,
-        .cipher = default_aes_cipher,
-        .auth_init = default_aes_auth_init, 
-        .auth_core = default_aes_auth_core,
-        .auth_finish = default_aes_auth_finish
-    },
-# endif
-# if defined(HCA_HAS_SHA)
-    .hash_func = {
-        .sha_init = hca_sha_init, 
-        .sha_core = hca_sha_core,
-        .sha_finish = hca_sha_finish
-    },
-# else
-    .hash_func = {
-        .sha_init = default_sha_init, 
-        .sha_core = default_sha_core,
-        .sha_finish = default_sha_finish
-    },
-# endif
-# if defined(HCA_HAS_TRNG)
-    .trng_func = {
-#  if defined(HCA_BYPASS_TRNG)
-        .init = default_trng_init,
-        .get_data = default_trng_getdata
-#  else
-        .init = hca_trng_init,
-        .get_data = hca_trng_getdata
-#  endif
-    },
-# else
-    .trng_func = {
-        .init = default_trng_init,
-        .get_data = default_trng_getdata
-    },
-# endif
-    .hca_base = METAL_SIFIVE_HCA_0_BASE_ADDRESS
-};
-#else
-metal_scl_t metal_sifive_scl = {
-    .aes_func = {
-        .setkey = default_aes_setkey,
-        .setiv  = default_aes_setiv,
-        .cipher = default_aes_cipher,
-        .auth_init = default_aes_auth_init, 
-        .auth_core = default_aes_auth_core,
-        .auth_finish = default_aes_auth_finish
-    },
-    .hash_func = {
-        .sha_init = default_sha_init, 
-        .sha_core = default_sha_core,
-        .sha_finish = default_sha_finish
-    },
-    .trng_func = {
-        .init = default_trng_init,
-        .get_data = default_trng_getdata
-    },
-    .hca_base = 0
-};
-#endif
-
-aes_auth_ctx_t ctx_aes_auth = {0};
-sha_ctx_t sha_ctx = {0};
+hca_aes_auth_ctx_t ctx_aes_auth = {0};
+hca_sha_ctx_t sha_ctx = {0};
 
 /*
  * Main
@@ -321,6 +243,8 @@ int main(int argc, char *argv[]) {
     size_t len;
 
 	struct metal_cpu cpu;
+    struct metal_hca hca = metal_hca_get_device(0);
+
 	cpu = metal_cpu_get(metal_cpu_get_current_hartid());
 
 #if __riscv_xlen == 32
@@ -331,18 +255,12 @@ int main(int argc, char *argv[]) {
 #elif __riscv_xlen == 32
     printf("HCA test arch=32!\n");
 #endif
-#if __riscv_xlen == 64
-    printf("HCA base@ = 0x%016lX\n",metal_sifive_scl.hca_base);
-#elif __riscv_xlen == 32
-    printf("HCA base@ = 0x%08lX\n",metal_sifive_scl.hca_base);
-#endif
-
 
     printf("AES - ECB\n");
     oldcount = metal_cpu_get_timer(cpu);
-    if (SCL_OK == metal_sifive_scl.aes_func.setkey(&metal_sifive_scl, SCL_AES_KEY128, key128_2, SCL_ENCRYPT))
+    if (METAL_CRYPTO_OK == metal_hca_aes_setkey(hca, METAL_CRYPTO_AES_KEY128, key128_2, METAL_CRYPTO_ENCRYPT))
     {
-        if (SCL_OK == metal_sifive_scl.aes_func.cipher(&metal_sifive_scl, SCL_AES_ECB, SCL_ENCRYPT, SCL_LITTLE_ENDIAN_MODE, (uint8_t *)plaintext_le, sizeof(plaintext_le), (uint8_t *)tmp))
+        if (METAL_CRYPTO_OK == metal_hca_aes_cipher(hca, METAL_CRYPTO_AES_ECB, METAL_CRYPTO_ENCRYPT, METAL_CRYPTO_LITTLE_ENDIAN_MODE, (uint8_t *)plaintext_le, sizeof(plaintext_le), (uint8_t *)tmp))
         {
             cyclecount = metal_cpu_get_timer(cpu)-oldcount;
             
@@ -375,13 +293,13 @@ int main(int argc, char *argv[]) {
     memset(tag,0,2*sizeof(uint64_t));
     printf("AES - CCM\n");
     oldcount = metal_cpu_get_timer(cpu);
-    if (SCL_OK == metal_sifive_scl.aes_func.setkey(&metal_sifive_scl, SCL_AES_KEY128, NIST_key128_CCM2, SCL_ENCRYPT))
+    if (METAL_CRYPTO_OK == metal_hca_aes_setkey(hca, METAL_CRYPTO_AES_KEY128, NIST_key128_CCM2, METAL_CRYPTO_ENCRYPT))
     {
-        if (SCL_OK == metal_sifive_scl.aes_func.setiv(&metal_sifive_scl, NIST_IV_CCM2))
+        if (METAL_CRYPTO_OK == metal_hca_aes_setiv(hca, NIST_IV_CCM2))
         {
-            if (SCL_OK ==  metal_sifive_scl.aes_func.auth_init(&metal_sifive_scl, &ctx_aes_auth, SCL_AES_CCM, SCL_ENCRYPT, SCL_LITTLE_ENDIAN_MODE, CCM_TQ(7, 2), (uint8_t *)NIST_AAD_CCM2, sizeof(NIST_AAD_CCM2), 0) )
+            if (METAL_CRYPTO_OK ==  metal_hca_aes_auth_init(hca, &ctx_aes_auth, METAL_CRYPTO_AES_CCM, METAL_CRYPTO_ENCRYPT, METAL_CRYPTO_LITTLE_ENDIAN_MODE, CCM_TQ(7, 2), (uint8_t *)NIST_AAD_CCM2, sizeof(NIST_AAD_CCM2), 0) )
             {
-                if (SCL_OK ==  metal_sifive_scl.aes_func.auth_finish(&metal_sifive_scl, &ctx_aes_auth, (uint8_t *)&tmp[2], tag) )
+                if (METAL_CRYPTO_OK ==  metal_hca_aes_auth_finish(hca, &ctx_aes_auth, (uint8_t *)&tmp[2], tag) )
                 {
                     cyclecount = metal_cpu_get_timer(cpu)-oldcount;
 
@@ -434,15 +352,15 @@ int main(int argc, char *argv[]) {
     memset(tag,0,2*sizeof(uint64_t));
     printf("AES - CCM - 2\n");
     oldcount = metal_cpu_get_timer(cpu);
-    if (SCL_OK == metal_sifive_scl.aes_func.setkey(&metal_sifive_scl, SCL_AES_KEY128, NIST_key128_CCM, SCL_ENCRYPT))
+    if (METAL_CRYPTO_OK == metal_hca_aes_setkey(hca, METAL_CRYPTO_AES_KEY128, NIST_key128_CCM, METAL_CRYPTO_ENCRYPT))
     {
-        if (SCL_OK == metal_sifive_scl.aes_func.setiv(&metal_sifive_scl, NIST_IV_CCM))
+        if (METAL_CRYPTO_OK == metal_hca_aes_setiv(hca, NIST_IV_CCM))
         {
-            if (SCL_OK ==  metal_sifive_scl.aes_func.auth_init(&metal_sifive_scl, &ctx_aes_auth, SCL_AES_CCM, SCL_ENCRYPT, SCL_LITTLE_ENDIAN_MODE, CCM_TQ(7, 2), (uint8_t *)NIST_AAD_CCM, sizeof(NIST_AAD_CCM), sizeof(NIST_DATA_CCM)) )
+            if (METAL_CRYPTO_OK ==  metal_hca_aes_auth_init(hca, &ctx_aes_auth, METAL_CRYPTO_AES_CCM, METAL_CRYPTO_ENCRYPT, METAL_CRYPTO_LITTLE_ENDIAN_MODE, CCM_TQ(7, 2), (uint8_t *)NIST_AAD_CCM, sizeof(NIST_AAD_CCM), sizeof(NIST_DATA_CCM)) )
             {
-                if (SCL_OK ==  metal_sifive_scl.aes_func.auth_core(&metal_sifive_scl, &ctx_aes_auth, (uint8_t *)NIST_DATA_CCM, sizeof(NIST_DATA_CCM), (uint8_t *)tmp, &len) )
+                if (METAL_CRYPTO_OK ==  metal_hca_aes_auth_core(hca, &ctx_aes_auth, (uint8_t *)NIST_DATA_CCM, sizeof(NIST_DATA_CCM), (uint8_t *)tmp, &len) )
                 {
-                    if (SCL_OK ==  metal_sifive_scl.aes_func.auth_finish(&metal_sifive_scl, &ctx_aes_auth, (uint8_t *)&tmp[len / sizeof(uint64_t)], tag) )
+                    if (METAL_CRYPTO_OK ==  metal_hca_aes_auth_finish(hca, &ctx_aes_auth, (uint8_t *)&tmp[len / sizeof(uint64_t)], tag) )
                     {
                         cyclecount = metal_cpu_get_timer(cpu)-oldcount;
 
@@ -507,15 +425,15 @@ int main(int argc, char *argv[]) {
     memset(tag,0,2*sizeof(uint64_t));
     printf("AES - GCM\n");
     oldcount = metal_cpu_get_timer(cpu);
-    if (SCL_OK == metal_sifive_scl.aes_func.setkey(&metal_sifive_scl, SCL_AES_KEY128, NIST_key128_GCM, SCL_ENCRYPT))
+    if (METAL_CRYPTO_OK == metal_hca_aes_setkey(hca, METAL_CRYPTO_AES_KEY128, NIST_key128_GCM, METAL_CRYPTO_ENCRYPT))
     {
-        if (SCL_OK == metal_sifive_scl.aes_func.setiv(&metal_sifive_scl, NIST_IV_GCM))
+        if (METAL_CRYPTO_OK == metal_hca_aes_setiv(hca, NIST_IV_GCM))
         {
-            if (SCL_OK ==  metal_sifive_scl.aes_func.auth_init(&metal_sifive_scl, &ctx_aes_auth, SCL_AES_GCM, SCL_ENCRYPT, SCL_LITTLE_ENDIAN_MODE, 0, (uint8_t *)NIST_AAD_GCM, sizeof(NIST_AAD_GCM), sizeof(NIST_DATA_GCM)) )
+            if (METAL_CRYPTO_OK ==  metal_hca_aes_auth_init(hca, &ctx_aes_auth, METAL_CRYPTO_AES_GCM, METAL_CRYPTO_ENCRYPT, METAL_CRYPTO_LITTLE_ENDIAN_MODE, 0, (uint8_t *)NIST_AAD_GCM, sizeof(NIST_AAD_GCM), sizeof(NIST_DATA_GCM)) )
             {
-                if (SCL_OK ==  metal_sifive_scl.aes_func.auth_core(&metal_sifive_scl, &ctx_aes_auth, (uint8_t *)NIST_DATA_GCM, sizeof(NIST_DATA_GCM), (uint8_t *)tmp, &len) )
+                if (METAL_CRYPTO_OK ==  metal_hca_aes_auth_core(hca, &ctx_aes_auth, (uint8_t *)NIST_DATA_GCM, sizeof(NIST_DATA_GCM), (uint8_t *)tmp, &len) )
                 {
-                    if (SCL_OK ==  metal_sifive_scl.aes_func.auth_finish(&metal_sifive_scl, &ctx_aes_auth, NULL, tag) )
+                    if (METAL_CRYPTO_OK ==  metal_hca_aes_auth_finish(hca, &ctx_aes_auth, NULL, tag) )
                     {
                         cyclecount = metal_cpu_get_timer(cpu)-oldcount;
 
@@ -580,11 +498,11 @@ int main(int argc, char *argv[]) {
     digest_len = 32;
     oldcount = metal_cpu_get_timer(cpu);
 
-    if (SCL_OK == metal_sifive_scl.hash_func.sha_init(&metal_sifive_scl, &sha_ctx, SCL_HASH_SHA256, SCL_BIG_ENDIAN_MODE))
+    if (METAL_CRYPTO_OK == metal_hca_sha_init(hca, &sha_ctx, METAL_CRYPTO_HASH_SHA256, METAL_CRYPTO_BIG_ENDIAN_MODE))
     {
-        if (SCL_OK == metal_sifive_scl.hash_func.sha_core(&metal_sifive_scl, &sha_ctx, message, sizeof(message) - 1 ))
+        if (METAL_CRYPTO_OK == metal_hca_sha_core(hca, &sha_ctx, message, sizeof(message) - 1 ))
         {
-            if (SCL_OK == metal_sifive_scl.hash_func.sha_finish(&metal_sifive_scl, &sha_ctx, (uint8_t *)tmp, &digest_len))
+            if (METAL_CRYPTO_OK == metal_hca_sha_finish(hca, &sha_ctx, (uint8_t *)tmp, &digest_len))
             {
                 cyclecount = metal_cpu_get_timer(cpu)-oldcount;
 
@@ -627,11 +545,11 @@ int main(int argc, char *argv[]) {
     printf("SHA224\n");
     digest_len = 28;
     oldcount = metal_cpu_get_timer(cpu);
-    if (SCL_OK == metal_sifive_scl.hash_func.sha_init(&metal_sifive_scl, &sha_ctx, SCL_HASH_SHA224, SCL_BIG_ENDIAN_MODE))
+    if (METAL_CRYPTO_OK == metal_hca_sha_init(hca, &sha_ctx, METAL_CRYPTO_HASH_SHA224, METAL_CRYPTO_BIG_ENDIAN_MODE))
     {
-        if (SCL_OK == metal_sifive_scl.hash_func.sha_core(&metal_sifive_scl, &sha_ctx, message, sizeof(message) - 1 ))
+        if (METAL_CRYPTO_OK == metal_hca_sha_core(hca, &sha_ctx, message, sizeof(message) - 1 ))
         {
-            if (SCL_OK == metal_sifive_scl.hash_func.sha_finish(&metal_sifive_scl, &sha_ctx, (uint8_t *)tmp, &digest_len))
+            if (METAL_CRYPTO_OK == metal_hca_sha_finish(hca, &sha_ctx, (uint8_t *)tmp, &digest_len))
             {
                 cyclecount = metal_cpu_get_timer(cpu)-oldcount;
 
@@ -674,13 +592,13 @@ int main(int argc, char *argv[]) {
     memset(tmp,0,8*sizeof(uint64_t));
     printf("TRNG - TEST\n");
     oldcount = metal_cpu_get_timer(cpu);
-    if (SCL_OK == metal_sifive_scl.trng_func.init(&metal_sifive_scl))
+    if (METAL_CRYPTO_OK == metal_hca_trng_init(hca))
     {
         cyclecount = metal_cpu_get_timer(cpu)-oldcount;
         printf("     INIT cyc: %u\n", (unsigned int)cyclecount);
 
         oldcount = metal_cpu_get_timer(cpu);
-        if (SCL_OK == metal_sifive_scl.trng_func.get_data(&metal_sifive_scl, &val))
+        if (METAL_CRYPTO_OK == metal_hca_trng_getdata(hca, &val))
         {
             cyclecount = metal_cpu_get_timer(cpu)-oldcount;
 #if __riscv_xlen == 64
@@ -691,7 +609,7 @@ int main(int argc, char *argv[]) {
             printf("    get_data cyc: %u\n", (unsigned int)cyclecount);
 
             oldcount = metal_cpu_get_timer(cpu);
-            if (SCL_OK == metal_sifive_scl.trng_func.get_data(&metal_sifive_scl, &val))
+            if (METAL_CRYPTO_OK == metal_hca_trng_getdata(hca, &val))
             {
                 cyclecount = metal_cpu_get_timer(cpu)-oldcount;
 #if __riscv_xlen == 64
@@ -707,7 +625,7 @@ int main(int argc, char *argv[]) {
             }
 
             oldcount = metal_cpu_get_timer(cpu);
-            if (SCL_OK == metal_sifive_scl.trng_func.get_data(&metal_sifive_scl, &val))
+            if (METAL_CRYPTO_OK == metal_hca_trng_getdata(hca, &val))
             {
                 cyclecount = metal_cpu_get_timer(cpu)-oldcount;
 #if __riscv_xlen == 64
